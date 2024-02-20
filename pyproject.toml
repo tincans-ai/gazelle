@@ -1,0 +1,20 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "gazelle"
+authors = [{ name = "Chris Hua", email = "chris@tincans.ai" }]
+readme = "readme.md"
+license = { file = "LICENSE" }
+classifiers = ["License :: OSI Approved :: Apache Software License"]
+dynamic = ["version", "description"]
+dependencies = [
+    "transformers>=4.37.0",
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "sentencepiece",
+]
+
+[project.urls]
+Home = "https://github.com/tincans-ai/gazelle"
