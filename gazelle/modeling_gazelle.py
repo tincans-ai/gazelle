@@ -278,9 +278,9 @@ GAZELLE_START_DOCSTRING = r"""
 )
 class GazellePreTrainedModel(PreTrainedModel):
     config_class = GazelleConfig
-    base_model_prefix = "model"
+    base_model_prefix = "gazelle"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["GazelleAudioAttention"]
+    _no_split_modules = ["GazelleAudioAttention", "Wav2Vec2Model"]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
 

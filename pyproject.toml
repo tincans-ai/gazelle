@@ -11,8 +11,8 @@ classifiers = ["License :: OSI Approved :: Apache Software License"]
 dynamic = ["version", "description"]
 dependencies = [
     "transformers>=4.37.0",
-    "torch>=2.2",
-    "torchaudio>=2.2",
+    "torch>=2.1",
+    "torchaudio>=2.1",
     "sentencepiece",
 ]
 
