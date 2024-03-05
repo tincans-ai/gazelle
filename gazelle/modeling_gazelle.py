@@ -13,7 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch Gazelle model."""
+"""PyTorch Gazelle model."""
+
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -31,7 +32,6 @@ from transformers import (
     ProcessorMixin,
     TensorType,
 )
-from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import ModelOutput
 from transformers.tokenization_utils_base import (
@@ -108,7 +108,6 @@ class GazelleConfig(PretrainedConfig):
         text_model_id=None,
         ignore_index=-100,
         audio_token_index=32000,
-        projector_hidden_act="gelu",
         vocab_size=32000,
         hidden_size=4096,
         stack_factor=8,
@@ -116,16 +115,14 @@ class GazelleConfig(PretrainedConfig):
     ):
         self.ignore_index = ignore_index
         self.audio_token_index = audio_token_index
-        self.projector_hidden_act = projector_hidden_act
         self.vocab_size = vocab_size
-
-        self.audio_config = audio_config
-        self.vocab_size = self.vocab_size
 
         self.audio_model_id = audio_model_id
         self.text_model_id = text_model_id
 
+        self.audio_config = audio_config
         self.text_config = text_config
+
         self.hidden_size = hidden_size
         self.stack_factor = stack_factor
 
@@ -204,35 +201,57 @@ class ProjectionLayer(nn.Module):
         return audio_embeds
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        From huggingface's LlamaRMSNorm
+        https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L75
+        """
+        super().__init__()
+        # the default initialization here is to 1
+        # however, https://arxiv.org/abs/2206.10139 shows stronger improvements initializing to smaller weights
+        # we arbitrarily pick 0.4 here, seemed like good results
+        self.weight = nn.Parameter(torch.full((hidden_size,), 0.4))
+        # self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+
+class SwiGLU(nn.Module):
+    def forward(self, x):
+        x, gate = x.chunk(2, dim=-1)
+        return F.silu(gate) * x
+
+
 class GazelleProjector(ProjectionLayer):
     def __init__(self, config: GazelleConfig):
         self.hidden_dim = config.hidden_size
         super().__init__(config.stack_factor)
-
-        # NB chua: for some reason the config treatment is inconsistent in inference/training. ugly hack.
-        try:
-            self.linear_1 = nn.Linear(
-                config.audio_config.hidden_size * self.stack_factor,
-                self.hidden_dim,
-                bias=True,
-            )
-        except:
-            self.linear_1 = nn.Linear(
-                config.audio_config["hidden_size"] * self.stack_factor,
-                self.hidden_dim,
-                bias=True,
-            )
-        self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(
-            self.hidden_dim, config.text_config.hidden_size, bias=True
+        self.ln_pre = RMSNorm(config.audio_config.hidden_size * self.stack_factor)
+        self.linear_1 = nn.Linear(
+            config.audio_config.hidden_size * self.stack_factor,
+            self.hidden_dim,
+            bias=False,
         )
+        self.act = SwiGLU()
+        self.linear_2 = nn.Linear(
+            self.hidden_dim // 2, config.text_config.hidden_size, bias=False
+        )
+        self.ln_post = RMSNorm(config.text_config.hidden_size)
 
     def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
         audio_features = self._pad_and_stack(audio_features)
-
+        audio_features = self.ln_pre(audio_features)
         hidden_states = self.linear_1(audio_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
+        hidden_states = self.ln_post(hidden_states)
         return hidden_states
 
 
@@ -266,9 +285,6 @@ class GazellePreTrainedModel(PreTrainedModel):
     _supports_flash_attn_2 = True
 
     def _init_weights(self, module):
-        # NB chua: unclear if this code is supposed to be here
-        # seems ok but the original HF llava code was not designed for training
-        # we hack it in the init later on
         std = (
             self.config.initializer_range
             if hasattr(self.config, "initializer_range")
