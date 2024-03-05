@@ -10,8 +10,6 @@ This code is almost entirely ripped from [Huggingface's Llava implementation](ht
 
 Pretrained v0.1 model: [huggingface](https://huggingface.co/tincans-ai/gazelle-v0.1)
 
-
-
 ## Disclaimer
 
 We are backproppin' on a budget, the model is definitely not good enough for anything serious, it is mostly fun to make it do anything, the journey is the reward, so on.
