@@ -134,6 +134,15 @@ class GazelleConfig(PretrainedConfig):
             self.vocab_size = self.text_config.vocab_size
         elif text_config is None:
             self.text_config = CONFIG_MAPPING["llama"]()
+        
+        if isinstance(self.audio_config, dict):
+            audio_config["model_type"] = (
+                audio_config["model_type"] if "model_type" in audio_config else "wav2vec2"
+            )
+            self.audio_config = CONFIG_MAPPING[audio_config["model_type"]](**audio_config)
+            self.vocab_size = self.audio_config.vocab_size
+        elif audio_config is None:
+            self.audio_config = CONFIG_MAPPING["wav2vec2"]()
 
         super().__init__(**kwargs)
 
@@ -849,6 +858,7 @@ class GazelleProcessor(ProcessorMixin):
         truncation: Union[bool, str, TruncationStrategy] = None,
         max_length=None,
         return_tensors: Optional[Union[str, TensorType]] = TensorType.PYTORCH,
+        sampling_rate: int = 16000,
     ) -> BatchFeature:
         """
         Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
@@ -886,6 +896,9 @@ class GazelleProcessor(ProcessorMixin):
                 - `'pt'`: Return PyTorch `torch.Tensor` objects.
                 - `'np'`: Return NumPy `np.ndarray` objects.
                 - `'jax'`: Return JAX `jnp.ndarray` objects.
+            sampling_rate (`int`, *optional*, defaults to 16000):
+                Sampling rate of the input audio. We expect 16kHz audio. Don't change this value unless you know what
+                you are doing.
 
         Returns:
             [`BatchFeature`]: A [`BatchFeature`] with the following fields:
@@ -898,19 +911,21 @@ class GazelleProcessor(ProcessorMixin):
         """
         if audio is not None and len(audio) > 0:
             audio_values = self.audio_processor(
-                audio, return_tensors=return_tensors, sampling_rate=16000
-            ).input_values
+                audio, return_tensors=return_tensors, sampling_rate=sampling_rate
+            ).input_features
         else:
             audio_values = None
-        text_inputs = self.tokenizer(
-            text,
-            return_tensors=return_tensors,
-            padding=padding,
-            truncation=truncation,
-            max_length=max_length,
-        )
-
-        return BatchFeature(data={**text_inputs, "audio_values": audio_values})
+        if text is not None:
+            text_inputs = self.tokenizer(
+                text,
+                return_tensors=return_tensors,
+                padding=padding,
+                truncation=truncation,
+                max_length=max_length,
+            )
+            return BatchFeature(data={**text_inputs, "audio_values": audio_values})
+        else:
+            return BatchFeature(data={"audio_values": audio_values})
 
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode with CLIP->Llama
     def batch_decode(self, *args, **kwargs):
