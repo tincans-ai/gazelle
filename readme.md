@@ -4,7 +4,7 @@ This repository contains modeling code for the Gazelle Joint Speech Language Mod
 
 ![gazelle wearing headphones, cartoon style](logo.webp)
 
-For some more details, read our [blog post](https://tincans.ai/slm). Join us in [Discord](https://discord.gg/qyC5h3FSzU) as well.
+For some more details, read our [blog post](https://tincans.ai/slm) or [update](https://tincans.ai/slm2). Join us in [Discord](git@github.com:tincans-ai/gazelle.git) as well.
 
 This code is almost entirely ripped from [Huggingface's Llava implementation](https://github.com/huggingface/transformers/blob/f7ef7cec6c6c162087421f36a17eabdbb223579d/src/transformers/models/llava/modeling_llava.py). The main changes are just swapping the image encoder for an audio encoder and naively downsampling the audio inputs to a lower frequency. I also added ability to load model weights from pretrained models so that you can train off this code. 
 
