@@ -1,23 +1,35 @@
 # Gazelle - Joint Speech Language Model
 
-This repository contains modeling code for the Gazelle Joint Speech Language Model. Gazelles are fast and if you really squint at 'jsl' while sleep-derived (and forget the difference between the letters `j` and `g`), it makes sense.
+This repository contains modeling code for the Gazelle Joint Speech Language Model. 
 
 ![gazelle wearing headphones, cartoon style](logo.webp)
 
-For some more details, read our [blog post](https://tincans.ai/slm) or [update](https://tincans.ai/slm2). Join us in [Discord](git@github.com:tincans-ai/gazelle.git) as well.
+For some more details, read our [blog post](https://tincans.ai/slm) or [update](https://tincans.ai/slm2).
 
-This code is almost entirely ripped from [Huggingface's Llava implementation](https://github.com/huggingface/transformers/blob/f7ef7cec6c6c162087421f36a17eabdbb223579d/src/transformers/models/llava/modeling_llava.py). The main changes are just swapping the image encoder for an audio encoder and naively downsampling the audio inputs to a lower frequency. I also added ability to load model weights from pretrained models so that you can train off this code. 
+This inference code is heavily derived from [Huggingface's Llava implementation](https://github.com/huggingface/transformers/blob/f7ef7cec6c6c162087421f36a17eabdbb223579d/src/transformers/models/llava/modeling_llava.py). It is not particularly optimized, but we welcome community contributions.
 
-Pretrained v0.1 model: [huggingface](https://huggingface.co/tincans-ai/gazelle-v0.1)
+**Checkpoints**:
+
+- v0.2: [huggingface](https://huggingface.co/tincans-ai/gazelle-v0.2)
+- v0.2-dpo: [huggingface](https://huggingface.co/tincans-ai/gazelle-v0.2-dpo)
+- v0.1: [huggingface](https://huggingface.co/tincans-ai/gazelle-v0.1)
+
+**Links**:
+
+- Join us in [Discord](https://discord.gg/qyC5h3FSzU).
+- Original [blog post](https://tincans.ai/slm)
+- v0.1 [release notes](https://tincans.ai/slm2)
+
 
 ## Disclaimer
 
-We are backproppin' on a budget, the model is definitely not good enough for anything serious, it is mostly fun to make it do anything, the journey is the reward, so on.
+We are backproppin' on a budget and these initial checkpoints are not very robust to many real-world considerations. We make no representation of warranty or liability.
 
-Some basic red-teaming and prompt injection in audio shows that the model employs the same safeguards as Llama chat. We have not extensively tested this and make no warranties, it does not represent our views, etc.
+The v0.2 model responds to jailbreaks and adversarial attacks. We do not suggest using this in production.
 
 ## License
 
-This work is heavily derived from Transformers and Llava, both of which are licensed under Apache 2.0. This work is also licensed under Apache 2.0.
+This modeling code is licensed under Apache 2.0. The v0.2 release is derived from Mistral 7B and is released under the same Apache 2.0 license.
 
-The pretrained checkpoints also derive from Llama 2, which is governed by the [Llama 2 license](https://ai.meta.com/llama/license/). You must agree to these terms if you use the pretrained weights!
+The v0.1 pretrained checkpoints derive from Llama 2, which is governed by the [Llama 2 license](https://ai.meta.com/llama/license/). You must agree to these terms if you use the pretrained weights!
+
