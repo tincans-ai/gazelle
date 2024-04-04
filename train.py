@@ -20,6 +20,7 @@ from transformers import DataCollatorForSeq2Seq, LlamaTokenizerFast, Wav2Vec2Pro
 parser = argparse.ArgumentParser()
 parser.add_argument("--metadata-file", "-m", type=str)
 parser.add_argument("--audio-dir", "-a", type=str)
+parser.add_argument("--batch-size", "-b", type=int, default=4)
 parser.add_argument("--data-type", "-d", type=str, default="bfloat16")
 parser.add_argument("--num-samples", "-n", type=int)
 args = parser.parse_args()
@@ -150,7 +151,7 @@ train_dataset = SpeechDataset(args, processor)
 # Set up the data loader
 data_collator = DataCollatorForSeq2SeqWithAudio(tokenizer=llama_tokenizer)
 train_loader = DataLoader(
-    train_dataset, batch_size=4, collate_fn=data_collator, shuffle=True
+    train_dataset, batch_size=args.batch_size, collate_fn=data_collator, shuffle=True
 )
 
 # Set up the optimizer and learning rate scheduler
