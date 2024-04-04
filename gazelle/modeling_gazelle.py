@@ -403,6 +403,8 @@ class GazelleForConditionalGeneration(GazellePreTrainedModel):
             self.audio_tower = AutoModel.from_pretrained(config.audio_model_id)
         else:
             self.audio_tower = AutoModel.from_config(config.audio_config)
+        for param in self.audio_tower.parameters():
+            param.requires_grad = False
 
         self.multi_modal_projector = GazelleProjector(config)
         self.vocab_size = config.vocab_size
@@ -414,6 +416,8 @@ class GazelleForConditionalGeneration(GazellePreTrainedModel):
             self.language_model = AutoModelForCausalLM.from_config(
                 config.text_config, attn_implementation=config._attn_implementation
             )
+        for param in self.language_model.parameters():
+            param.requires_grad = False
         self.pad_token_id = (
             self.config.pad_token_id if self.config.pad_token_id is not None else -1
         )
