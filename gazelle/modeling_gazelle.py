@@ -134,12 +134,16 @@ class GazelleConfig(PretrainedConfig):
             self.vocab_size = self.text_config.vocab_size
         elif text_config is None:
             self.text_config = CONFIG_MAPPING["llama"]()
-        
+
         if isinstance(self.audio_config, dict):
             audio_config["model_type"] = (
-                audio_config["model_type"] if "model_type" in audio_config else "wav2vec2"
+                audio_config["model_type"]
+                if "model_type" in audio_config
+                else "wav2vec2"
             )
-            self.audio_config = CONFIG_MAPPING[audio_config["model_type"]](**audio_config)
+            self.audio_config = CONFIG_MAPPING[audio_config["model_type"]](
+                **audio_config
+            )
             self.vocab_size = self.audio_config.vocab_size
         elif audio_config is None:
             self.audio_config = CONFIG_MAPPING["wav2vec2"]()
@@ -910,9 +914,10 @@ class GazelleProcessor(ProcessorMixin):
             - **audio_values** -- Processed audio values to be fed to a model. Returned when `audios` is not `None`.
         """
         if audio is not None and len(audio) > 0:
-            audio_values = self.audio_processor(
+            x = self.audio_processor(
                 audio, return_tensors=return_tensors, sampling_rate=sampling_rate
-            ).input_features
+            )
+            audio_values = x.input_values  # features
         else:
             audio_values = None
         if text is not None:

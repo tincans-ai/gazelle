@@ -1,21 +1,13 @@
 # Gazelle POC training configuration
 
 name: gazelle-poc
-image: mosaicml/pytorch:latest
+image: mosaicml/composer:latest
 compute:
   gpus: 8
   cluster: r7z2
 integrations:
   - integration_type: git_repo
     git_repo: fixie-ai/gazelle
-    pip_install: -r gazelle/requirements.txt
+    pip_install: -r requirements.txt
 command: >-
-  # Train for 100 batches
-    composer gazelle/gazelle/train.py \
-    mcloud_gazelle.yaml \
-    data_local=my-copy-c4 \
-    train_loader.dataset.split=train_small \
-    eval_loader.dataset.split=val_small \
-    max_duration=100ba \
-    eval_interval=0 \
-    save_folder=gazelle-poc
+  python gazelle/gazelle/train.py

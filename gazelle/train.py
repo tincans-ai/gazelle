@@ -1,6 +1,15 @@
+import argparse
 import math
 import torch
+import json
 import librosa
+import numpy as np
+from dataclasses import dataclass
+from transformers import (
+    Wav2Vec2Processor,
+    LlamaTokenizerFast,
+    DataCollatorForSeq2Seq,
+)
 from torch.utils.data import DataLoader, Dataset
 from modeling_gazelle import (
     GazelleConfig,
@@ -8,35 +17,74 @@ from modeling_gazelle import (
     GazelleProcessor,
 )
 
-AUDIO_FILES = []
-TEXT_DATA = []
+parser = argparse.ArgumentParser()
+parser.add_argument("--metadata-file", "-m", type=str)
+parser.add_argument("--audio-dir", "-a", type=str)
+parser.add_argument("--data-type", "-d", type=str, default="bfloat16")
+args = parser.parse_args()
+dtype = torch.bfloat16 if args.data_type == "bfloat16" else torch.float32
+
+
+@dataclass
+class DataCollatorForSeq2SeqWithAudio(DataCollatorForSeq2Seq):
+    def __call__(self, features, *args, **kwargs):
+        audio_features = [f.pop("audio_values") for f in features]
+        batch = super().__call__(features, *args, **kwargs)
+        batch["audio_values"] = torch.nn.utils.rnn.pad_sequence(
+            audio_features, batch_first=True
+        )
+
+        return batch
 
 
 class SpeechDataset(Dataset):
-    def __init__(self, audio_files, text_data, processor):
-        self.audio_files = audio_files
-        self.text_data = text_data
+    """
+    Metadata file format:
+    {"chat": [
+        {"role": "USER", "message": "Write a sentence based on this summary: iraqi embassy in jakarta removes saddam hussein 's photo", "speech": "chunk_00000/0001.mp3"},
+        {"role": "AnyGPT", "message": "The building in Jakarta where people from Iraq work, took down a picture of a man named Saddam Hussein.", "speech": "chunk_00000/0002.mp3"}
+    ]}
+    """
+
+    def __init__(self, args, processor):
+        self.audio_dir = args.audio_dir
+        with open(args.metadata_file, "r") as f:
+            self.metadata = [json.loads(line) for line in f.readlines()]
         self.processor = processor
+        print(f"Loaded {len(self.metadata)} samples from {args.metadata_file}")
 
     def __len__(self):
-        return len(self.audio_files)
+        return len(self.metadata)
 
     def __getitem__(self, idx):
-        audio_file = self.audio_files[idx]
-        text = self.text_data[idx]
+        print(f"Processing sample {idx}...")
+        metadata = self.metadata[idx]
+        messages = metadata["chat"]
+        audio_file = self.audio_dir + "/" + messages[0]["speech"]
+        chat = [
+            {"role": "user", "content": "Listen to <|audio|> and respond to it"},
+            {"role": "assistant", "content": messages[1]["message"]},
+        ]
+        text = self.processor.tokenizer.apply_chat_template(chat, tokenize=False)
 
         # Load audio data
         audio, _ = librosa.load(audio_file, sr=16000)
+        audio = np.expand_dims(audio, axis=0)
+        print(f"Loaded audio file {audio_file} with shape {audio.shape}")
 
         # Process audio and text using GazelleProcessor
         inputs = self.processor(
-            text=text, audio=audio, return_tensors="pt", padding=True, truncation=True
+            text=text,
+            audio=audio,
+            return_tensors="pt",
+            padding=True,
+            # truncation=True,
         )
 
         # Extract input_ids, attention_mask, and audio_values from the processed inputs
         input_ids = inputs["input_ids"].squeeze(0)
         attention_mask = inputs["attention_mask"].squeeze(0)
-        audio_values = inputs["audio_values"].squeeze(0)
+        audio_values = inputs["audio_values"].squeeze(0).to(model.device).to(dtype)
 
         # Create labels by shifting the input_ids to the right
         labels = input_ids.clone()
@@ -52,20 +100,37 @@ class SpeechDataset(Dataset):
 
 
 # Instantiate the model and processor
-config = GazelleConfig()  # stock options
+config = GazelleConfig(
+    audio_model_id="facebook/wav2vec2-base-960h",
+    text_model_id="meta-llama/Llama-2-7b-chat-hf",
+)
+
+print("Instantiating model...")
 model = GazelleForConditionalGeneration(config)
-processor = GazelleProcessor()
+print("Instantiating processor...")
+llama_tokenizer = LlamaTokenizerFast.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+llama_tokenizer.pad_token_id = 0
+llama_tokenizer.add_special_tokens({"additional_special_tokens": ["<|audio|>"]})
+model.resize_token_embeddings(len(llama_tokenizer))
+processor = GazelleProcessor(
+    Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h"), llama_tokenizer
+)
+print("Model and processor instantiated.")
 
 # Move the model to GPU and enable bfloat16
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-model.to(torch.bfloat16)
+device_type = "cuda" if torch.cuda.is_available() else "cpu"
+device = torch.device(device_type)
+print(f"Using device: {device}")
+model.to(device).to(dtype)
 
 # Prepare the dataset
-train_dataset = SpeechDataset(AUDIO_FILES, TEXT_DATA, processor)
+train_dataset = SpeechDataset(args, processor)
 
 # Set up the data loader
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+data_collator = DataCollatorForSeq2SeqWithAudio(tokenizer=llama_tokenizer)
+train_loader = DataLoader(
+    train_dataset, batch_size=4, collate_fn=data_collator, shuffle=True
+)
 
 # Set up the optimizer and learning rate scheduler
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-3)
@@ -79,15 +144,17 @@ scheduler = torch.optim.lr_scheduler.LambdaLR(
 num_epochs = 1
 grad_accum_steps = 16
 
+print("Starting training...")
 model.train()
 for epoch in range(num_epochs):
+    print(f"Epoch {epoch + 1}/{num_epochs}")
     for step, batch in enumerate(train_loader):
         audio_values = batch["audio_values"].to(device)
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=dtype):
             outputs = model(
                 audio_values=audio_values,
                 input_ids=input_ids,
