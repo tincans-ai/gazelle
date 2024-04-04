@@ -10,4 +10,4 @@ integrations:
     git_repo: fixie-ai/gazelle
     pip_install: -r requirements.txt
 command: >-
-  python gazelle/gazelle/train.py
+  python gazelle/train.py -n 100

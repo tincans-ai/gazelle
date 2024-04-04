@@ -1,26 +1,27 @@
 import argparse
-import math
-import torch
+import io
 import json
+import math
+import os
+from dataclasses import dataclass
+
 import librosa
 import numpy as np
-from dataclasses import dataclass
-from transformers import (
-    Wav2Vec2Processor,
-    LlamaTokenizerFast,
-    DataCollatorForSeq2Seq,
-)
-from torch.utils.data import DataLoader, Dataset
-from modeling_gazelle import (
+import requests
+import torch
+from gazelle import (
     GazelleConfig,
     GazelleForConditionalGeneration,
     GazelleProcessor,
 )
+from torch.utils.data import DataLoader, Dataset
+from transformers import DataCollatorForSeq2Seq, LlamaTokenizerFast, Wav2Vec2Processor
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--metadata-file", "-m", type=str)
 parser.add_argument("--audio-dir", "-a", type=str)
 parser.add_argument("--data-type", "-d", type=str, default="bfloat16")
+parser.add_argument("--num-samples", "-n", type=int)
 args = parser.parse_args()
 dtype = torch.bfloat16 if args.data_type == "bfloat16" else torch.float32
 
@@ -47,11 +48,23 @@ class SpeechDataset(Dataset):
     """
 
     def __init__(self, args, processor):
+        self.session = requests.Session()
         self.audio_dir = args.audio_dir
-        with open(args.metadata_file, "r") as f:
-            self.metadata = [json.loads(line) for line in f.readlines()]
         self.processor = processor
-        print(f"Loaded {len(self.metadata)} samples from {args.metadata_file}")
+        if args.metadata_file:
+            print(f"Loading metadata from {args.metadata_file}...")
+            with open(args.metadata_file, "r") as f:
+                self.metadata = [json.loads(line) for line in f.readlines()]
+        else:
+            print("Loading metadata from Hugging Face dataset...")
+            response = self.session.get(
+                "https://huggingface.co/datasets/fnlp/AnyInstruct/resolve/main/speech_conv/metadata.jsonl"
+            )
+            response.raise_for_status()
+            self.metadata = [json.loads(line) for line in response.text.splitlines()]
+        if args.num_samples:
+            self.metadata = self.metadata[: args.num_samples]
+        print(f"Loaded {len(self.metadata)} samples from metadata file.")
 
     def __len__(self):
         return len(self.metadata)
@@ -60,7 +73,6 @@ class SpeechDataset(Dataset):
         print(f"Processing sample {idx}...")
         metadata = self.metadata[idx]
         messages = metadata["chat"]
-        audio_file = self.audio_dir + "/" + messages[0]["speech"]
         chat = [
             {"role": "user", "content": "Listen to <|audio|> and respond to it"},
             {"role": "assistant", "content": messages[1]["message"]},
@@ -68,9 +80,18 @@ class SpeechDataset(Dataset):
         text = self.processor.tokenizer.apply_chat_template(chat, tokenize=False)
 
         # Load audio data
-        audio, _ = librosa.load(audio_file, sr=16000)
+        audio_filename = messages[0]["speech"]
+        if self.audio_dir:
+            audio_path = os.path.join(self.audio_dir, audio_filename)
+            audio, _ = librosa.load(audio_path, sr=16000)
+        else:
+            url = f"https://storage.googleapis.com/train-anyinstruct-speechconv-v1/{audio_filename}"
+            response = self.session.get(url)
+            response.raise_for_status()
+            audio_bytes = io.BytesIO(response.content)
+            audio, _ = librosa.load(audio_bytes, sr=16000)
         audio = np.expand_dims(audio, axis=0)
-        print(f"Loaded audio file {audio_file} with shape {audio.shape}")
+        # print(f"Loaded audio file {audio_filename} with shape {audio.shape}")
 
         # Process audio and text using GazelleProcessor
         inputs = self.processor(
