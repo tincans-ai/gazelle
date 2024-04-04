@@ -9,19 +9,19 @@ import librosa
 import numpy as np
 import requests
 import torch
-from gazelle import (
-    GazelleConfig,
-    GazelleForConditionalGeneration,
-    GazelleProcessor,
-)
+from bitsandbytes.optim import AdamW8bit
+from torch.optim import AdamW, lr_scheduler
 from torch.utils.data import DataLoader, Dataset
 from transformers import DataCollatorForSeq2Seq, LlamaTokenizerFast, Wav2Vec2Processor
+
+from gazelle import GazelleConfig, GazelleForConditionalGeneration, GazelleProcessor
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--metadata-file", "-m", type=str)
 parser.add_argument("--audio-dir", "-a", type=str)
 parser.add_argument("--batch-size", "-b", type=int, default=4)
 parser.add_argument("--data-type", "-d", type=str, default="bfloat16")
+parser.add_argument("--optimizer", "-o", type=str, default="adamw_bnb_8bit")
 parser.add_argument("--num-samples", "-n", type=int)
 args = parser.parse_args()
 dtype = torch.bfloat16 if args.data_type == "bfloat16" else torch.float32
@@ -155,8 +155,15 @@ train_loader = DataLoader(
 )
 
 # Set up the optimizer and learning rate scheduler
-optimizer = torch.optim.AdamW(model.parameters(), lr=2e-3)
-scheduler = torch.optim.lr_scheduler.LambdaLR(
+
+lr = 2e-3
+if args.optimizer == "adamw_bnb_8bit":
+    optimizer = AdamW8bit(model.parameters(), lr=lr)
+elif args.optimizer == "adamw":
+    optimizer = AdamW(model.parameters(), lr=lr)
+else:
+    raise ValueError(f"Unknown optimizer: {args.optimizer}")
+scheduler = lr_scheduler.LambdaLR(
     optimizer,
     lr_lambda=lambda step: min(step / (len(train_loader) * 0.03), 1.0)
     * math.cos(math.pi * step / len(train_loader)),
