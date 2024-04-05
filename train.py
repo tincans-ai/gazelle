@@ -16,6 +16,14 @@ from transformers import DataCollatorForSeq2Seq, LlamaTokenizerFast, Wav2Vec2Pro
 
 from gazelle import GazelleConfig, GazelleForConditionalGeneration, GazelleProcessor
 
+TRANSCRIBE_PROMPT = (
+    "Transcribe the spoken words from <|audio|> with exact wording and punctuation"
+)
+ANSWER_PROMPT = "Listen to <|audio|> and respond to it"
+TRANSCRIBE_INPUT_TASK = "transcribe_input"
+TRANSCRIBE_OUTPUT_TASK = "transcribe_output"
+ANSWER_TASK = "answer"
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--metadata-file", "-m", type=str)
 parser.add_argument("--audio-dir", "-a", type=str)
@@ -45,7 +53,7 @@ class DataCollatorForSeq2SeqWithAudio(DataCollatorForSeq2Seq):
         return batch
 
 
-class SpeechDataset(Dataset):
+class AnyInstructSpeechDataset(Dataset):
     """
     Metadata file format:
     {"chat": [
@@ -61,34 +69,34 @@ class SpeechDataset(Dataset):
         if args.metadata_file:
             print(f"Loading metadata from {args.metadata_file}...")
             with open(args.metadata_file, "r") as f:
-                self.metadata = [json.loads(line) for line in f.readlines()]
+                jsonl = [json.loads(line) for line in f.readlines()]
         else:
             print("Loading metadata from Hugging Face dataset...")
             response = self.session.get(
                 "https://huggingface.co/datasets/fnlp/AnyInstruct/resolve/main/speech_conv/metadata.jsonl"
             )
             response.raise_for_status()
-            self.metadata = [json.loads(line) for line in response.text.splitlines()]
+            jsonl = [json.loads(line) for line in response.text.splitlines()]
+        # Create 3 tasks for each entry in the metadata file.
+        tasks = [TRANSCRIBE_INPUT_TASK, TRANSCRIBE_OUTPUT_TASK, ANSWER_TASK]
+        self.tasks = [self._create_task(o, task) for o in jsonl for task in tasks]
         if args.num_samples:
-            self.metadata = self.metadata[: args.num_samples]
-        print(f"Loaded {len(self.metadata)} samples from metadata file.")
+            self.tasks = self.tasks[: args.num_samples]
+        print(f"Loaded {len(self.tasks)} samples.")
 
     def __len__(self):
-        return len(self.metadata)
+        return len(self.tasks)
 
     def __getitem__(self, idx):
         if args.verbose:
             print(f"Processing sample {idx}...")
-        metadata = self.metadata[idx]
-        messages = metadata["chat"]
-        chat = [
-            {"role": "user", "content": "Listen to <|audio|> and respond to it"},
-            {"role": "assistant", "content": messages[1]["message"]},
-        ]
-        text = self.processor.tokenizer.apply_chat_template(chat, tokenize=False)
+        task = self.tasks[idx]
+        text = self.processor.tokenizer.apply_chat_template(
+            task["messages"], tokenize=False
+        )
+        audio_filename = task["audio_filename"]
 
         # Load audio data
-        audio_filename = messages[0]["speech"]
         if self.audio_dir:
             audio_path = os.path.join(self.audio_dir, audio_filename)
             audio, _ = librosa.load(audio_path, sr=16000)
@@ -99,7 +107,8 @@ class SpeechDataset(Dataset):
             audio_bytes = io.BytesIO(response.content)
             audio, _ = librosa.load(audio_bytes, sr=16000)
         audio = np.expand_dims(audio, axis=0)
-        # print(f"Loaded audio file {audio_filename} with shape {audio.shape}")
+        if args.verbose:
+            print(f"Loaded audio file {audio_filename} with shape {audio.shape}")
 
         # Process audio and text using GazelleProcessor
         inputs = self.processor(
@@ -127,6 +136,31 @@ class SpeechDataset(Dataset):
             "labels": labels,
         }
 
+    def _create_task(self, sample, task):
+        chat = sample["chat"]
+        if task == ANSWER_TASK:
+            # We ask the LLM to generate a text answer to the input query.
+            messages = [
+                {"role": "user", "content": ANSWER_PROMPT},
+                {"role": "assistant", "content": chat[1]["message"]},
+            ]
+            audio_filename = chat[0]["speech"]
+        elif task == TRANSCRIBE_INPUT_TASK:
+            # We ask the LLM to generate a text transcript for the input query.
+            messages = [
+                {"role": "user", "content": TRANSCRIBE_PROMPT},
+                {"role": "assistant", "content": chat[0]["message"]},
+            ]
+            audio_filename = chat[0]["speech"]
+        elif task == TRANSCRIBE_OUTPUT_TASK:
+            # We ask the LLM to generate a text transcript for the output answer.
+            messages = [
+                {"role": "user", "content": TRANSCRIBE_PROMPT},
+                {"role": "assistant", "content": chat[1]["message"]},
+            ]
+            audio_filename = chat[1]["speech"]
+        return {"messages": messages, "audio_filename": audio_filename}
+
 
 # Instantiate the model and processor
 config = GazelleConfig(
@@ -153,7 +187,7 @@ print(f"Using device: {device}")
 model.to(device).to(dtype)
 
 # Prepare the dataset
-train_dataset = SpeechDataset(args, processor)
+train_dataset = AnyInstructSpeechDataset(args, processor)
 
 # Set up the data loader
 data_collator = DataCollatorForSeq2SeqWithAudio(tokenizer=llama_tokenizer)
