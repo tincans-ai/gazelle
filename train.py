@@ -196,6 +196,7 @@ for epoch in range(num_epochs):
         loss.backward()
 
         if (step + 1) % grad_accum_steps == 0:
+            print(f"Step {step + 1}/{len(train_loader)}: loss={loss.item()}")
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
