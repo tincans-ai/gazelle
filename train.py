@@ -24,7 +24,11 @@ parser.add_argument("--data-type", "-d", type=str, default="bfloat16")
 parser.add_argument("--optimizer", "-o", type=str, default="adamw_bnb_8bit")
 parser.add_argument("--num-samples", "-n", type=int)
 args = parser.parse_args()
-dtype = torch.bfloat16 if args.data_type == "bfloat16" else torch.float32
+dtype = (
+    torch.bfloat16
+    if args.data_type == "bfloat16"
+    else torch.float16 if args.data_type == "float16" else torch.float32
+)
 
 
 @dataclass
