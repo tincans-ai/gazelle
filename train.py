@@ -23,6 +23,8 @@ parser.add_argument("--batch-size", "-b", type=int, default=4)
 parser.add_argument("--data-type", "-d", type=str, default="bfloat16")
 parser.add_argument("--optimizer", "-o", type=str, default="adamw_bnb_8bit")
 parser.add_argument("--num-samples", "-n", type=int)
+parser.add_argument("--num-epochs", "-e", type=int, default=1)
+parser.add_argument("--verbose", "-v", action="store_true")
 args = parser.parse_args()
 dtype = (
     torch.bfloat16
@@ -75,7 +77,8 @@ class SpeechDataset(Dataset):
         return len(self.metadata)
 
     def __getitem__(self, idx):
-        print(f"Processing sample {idx}...")
+        if args.verbose:
+            print(f"Processing sample {idx}...")
         metadata = self.metadata[idx]
         messages = metadata["chat"]
         chat = [
@@ -174,7 +177,7 @@ scheduler = lr_scheduler.LambdaLR(
 )
 
 # Training loop
-num_epochs = 1
+num_epochs = args.num_epochs
 grad_accum_steps = 16
 
 print("Starting training...")
@@ -200,7 +203,7 @@ for epoch in range(num_epochs):
         loss.backward()
 
         if (step + 1) % grad_accum_steps == 0:
-            print(f"Step {step + 1}/{len(train_loader)}: loss={loss.item()}")
+            print(f"Step {step + 1}/{len(train_loader)}: loss={loss.item():.4f}")
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
