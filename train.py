@@ -1,21 +1,21 @@
 import argparse
-import io
-import json
 import math
 import os
 from dataclasses import dataclass
+from datetime import datetime
 
 import librosa
 import numpy as np
-import requests
 import torch
 from bitsandbytes.optim import AdamW8bit
+from datasets import Audio, Dataset, IterableDataset, load_dataset
 from torch.optim import AdamW, lr_scheduler
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import DataCollatorForSeq2Seq, LlamaTokenizerFast, Wav2Vec2Processor
 
 from gazelle import GazelleConfig, GazelleForConditionalGeneration, GazelleProcessor
 
+SAMPLE_RATE = 16000
 TRANSCRIBE_PROMPT = (
     "Transcribe the spoken words from <|audio|> with exact wording and punctuation"
 )
@@ -23,15 +23,21 @@ ANSWER_PROMPT = "Listen to <|audio|> and respond to it"
 TRANSCRIBE_INPUT_TASK = "transcribe_input"
 TRANSCRIBE_OUTPUT_TASK = "transcribe_output"
 ANSWER_TASK = "answer"
+AUDIO_MODEL = "facebook/wav2vec2-base-960h"
+TEXT_MODEL = "meta-llama/Llama-2-7b-chat-hf"
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--metadata-file", "-m", type=str)
-parser.add_argument("--audio-dir", "-a", type=str)
-parser.add_argument("--batch-size", "-b", type=int, default=4)
-parser.add_argument("--data-type", "-d", type=str, default="bfloat16")
+parser.add_argument(
+    "--data-set", "-d", type=str, default="boolq", choices=["boolq", "anyinstruct"]
+)
+parser.add_argument("--data-dir", "-p", type=str)
+parser.add_argument("--device", "-D", type=str, default="cuda")
+parser.add_argument("--data-type", "-t", type=str, default="bfloat16")
 parser.add_argument("--optimizer", "-o", type=str, default="adamw_bnb_8bit")
 parser.add_argument("--num-samples", "-n", type=int)
 parser.add_argument("--num-epochs", "-e", type=int, default=1)
+parser.add_argument("--grad-accum-steps", "-g", type=int, default=16)
+parser.add_argument("--batch-size", "-b", type=int, default=4)
 parser.add_argument("--verbose", "-v", action="store_true")
 args = parser.parse_args()
 dtype = (
@@ -49,74 +55,37 @@ class DataCollatorForSeq2SeqWithAudio(DataCollatorForSeq2Seq):
         batch["audio_values"] = torch.nn.utils.rnn.pad_sequence(
             audio_features, batch_first=True
         )
-
         return batch
 
 
-class AnyInstructSpeechDataset(Dataset):
-    """
-    Metadata file format:
-    {"chat": [
-        {"role": "USER", "message": "Write a sentence based on this summary: iraqi embassy in jakarta removes saddam hussein 's photo", "speech": "chunk_00000/0001.mp3"},
-        {"role": "AnyGPT", "message": "The building in Jakarta where people from Iraq work, took down a picture of a man named Saddam Hussein.", "speech": "chunk_00000/0002.mp3"}
-    ]}
-    """
-
-    def __init__(self, args, processor):
-        self.session = requests.Session()
-        self.audio_dir = args.audio_dir
+class GazelleDataset(IterableDataset):
+    def __init__(self, dataset, processor, args):
+        self.dataset = dataset
         self.processor = processor
-        if args.metadata_file:
-            print(f"Loading metadata from {args.metadata_file}...")
-            with open(args.metadata_file, "r") as f:
-                jsonl = [json.loads(line) for line in f.readlines()]
-        else:
-            print("Loading metadata from Hugging Face dataset...")
-            response = self.session.get(
-                "https://huggingface.co/datasets/fnlp/AnyInstruct/resolve/main/speech_conv/metadata.jsonl"
-            )
-            response.raise_for_status()
-            jsonl = [json.loads(line) for line in response.text.splitlines()]
-        # Create 3 tasks for each entry in the metadata file.
-        tasks = [TRANSCRIBE_INPUT_TASK, TRANSCRIBE_OUTPUT_TASK, ANSWER_TASK]
-        self.tasks = [self._create_task(o, task) for o in jsonl for task in tasks]
-        if args.num_samples:
-            self.tasks = self.tasks[: args.num_samples]
-        print(f"Loaded {len(self.tasks)} samples.")
+        self.args = args
 
     def __len__(self):
-        return len(self.tasks)
+        return len(self.dataset)
 
     def __getitem__(self, idx):
         if args.verbose:
             print(f"Processing sample {idx}...")
-        task = self.tasks[idx]
-        text = self.processor.tokenizer.apply_chat_template(
-            task["messages"], tokenize=False
-        )
-        audio_filename = task["audio_filename"]
+        messages, audio = self._get_data(self.dataset[idx])
+        text = self.processor.tokenizer.apply_chat_template(messages, tokenize=False)
+        return self._make_audio_sample(text, audio)
 
-        # Load audio data
-        if self.audio_dir:
-            audio_path = os.path.join(self.audio_dir, audio_filename)
-            audio, _ = librosa.load(audio_path, sr=16000)
-        else:
-            url = f"https://storage.googleapis.com/train-anyinstruct-speechconv-v1/{audio_filename}"
-            response = self.session.get(url)
-            response.raise_for_status()
-            audio_bytes = io.BytesIO(response.content)
-            audio, _ = librosa.load(audio_bytes, sr=16000)
-        audio = np.expand_dims(audio, axis=0)
-        if args.verbose:
-            print(f"Loaded audio file {audio_filename} with shape {audio.shape}")
+    def select(self, indices):
+        self.dataset = self.dataset.select(indices)
+        return self
 
-        # Process audio and text using GazelleProcessor
+    def _make_audio_sample(self, text: str, audio: np.ndarray):
+        # Process audio and text using GazelleProcessor.
+        # Audio is expanded to be a [C x M] array, although C=1 for mono audio.
         inputs = self.processor(
             text=text,
-            audio=audio,
+            audio=np.expand_dims(audio, axis=0),
             return_tensors="pt",
-            padding=True,
-            # truncation=True,
+            text_padding=True,
         )
 
         # Extract input_ids, attention_mask, and audio_values from the processed inputs
@@ -127,7 +96,7 @@ class AnyInstructSpeechDataset(Dataset):
         # Create labels by shifting the input_ids to the right
         labels = input_ids.clone()
         labels[:-1] = input_ids[1:]
-        labels[-1] = self.processor.tokenizer.pad_token_id
+        labels[-1] = processor.tokenizer.pad_token_id
 
         return {
             "input_ids": input_ids,
@@ -135,6 +104,32 @@ class AnyInstructSpeechDataset(Dataset):
             "audio_values": audio_values,
             "labels": labels,
         }
+
+
+class AnyInstructSpeechDataset(GazelleDataset):
+    """
+    Metadata file format:
+    {"chat": [
+        {"role": "USER", "message": "Write a sentence based on this summary: iraqi embassy in jakarta removes saddam hussein 's photo", "speech": "chunk_00000/0001.mp3"},
+        {"role": "AnyGPT", "message": "The building in Jakarta where people from Iraq work, took down a picture of a man named Saddam Hussein.", "speech": "chunk_00000/0002.mp3"}
+    ]}
+    """
+
+    def __init__(self, args, processor):
+        dataset = load_dataset(
+            "json",
+            data_dir=args.data_dir,
+            data_files="metadata.jsonl",
+            split="train",
+        )
+        super().__init__(dataset, processor, args)
+
+    def _get_data(self, row):
+        task = self._create_task(row, ANSWER_TASK)
+        audio_filename = task["audio_filename"]
+        audio_path = os.path.join(args.data_dir, "speech", audio_filename)
+        audio, _ = librosa.load(audio_path, sr=SAMPLE_RATE)
+        return task["messages"], audio
 
     def _create_task(self, sample, task):
         chat = sample["chat"]
@@ -162,41 +157,69 @@ class AnyInstructSpeechDataset(Dataset):
         return {"messages": messages, "audio_filename": audio_filename}
 
 
+class BoolQDataset(GazelleDataset):
+    def __init__(self, args, processor):
+        dataset = Dataset.load_from_disk(os.path.join(args.data_dir)).cast_column(
+            "audio", Audio(sampling_rate=SAMPLE_RATE)
+        )
+        super().__init__(dataset, processor, args)
+
+    def _get_data(row):
+        messages = [
+            {
+                "role": "user",
+                "content": TRANSCRIBE_PROMPT,
+            },  # should this be ANSWER_PROMPT?
+            {"role": "assistant", "content": row["question"]},
+        ]
+        return messages, row["audio"]["array"]
+
+
 # Instantiate the model and processor
 config = GazelleConfig(
-    audio_model_id="facebook/wav2vec2-base-960h",
-    text_model_id="meta-llama/Llama-2-7b-chat-hf",
+    audio_model_id=AUDIO_MODEL,
+    text_model_id=TEXT_MODEL,
 )
 
 print("Instantiating model...")
 model = GazelleForConditionalGeneration(config)
 print("Instantiating processor...")
-llama_tokenizer = LlamaTokenizerFast.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
-llama_tokenizer.pad_token_id = 0
-llama_tokenizer.add_special_tokens({"additional_special_tokens": ["<|audio|>"]})
-model.resize_token_embeddings(len(llama_tokenizer))
-processor = GazelleProcessor(
-    Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h"), llama_tokenizer
-)
+text_tokenizer = LlamaTokenizerFast.from_pretrained(TEXT_MODEL)
+text_tokenizer.pad_token = text_tokenizer.eos_token
+text_tokenizer.add_special_tokens({"additional_special_tokens": ["<|audio|>"]})
+model.resize_token_embeddings(len(text_tokenizer))
+audio_processor = Wav2Vec2Processor.from_pretrained(AUDIO_MODEL)
+processor = GazelleProcessor(audio_processor, text_tokenizer)
 print("Model and processor instantiated.")
 
 # Move the model to GPU and enable bfloat16
-device_type = "cuda" if torch.cuda.is_available() else "cpu"
+device_type = (
+    args.device if args.device else "cuda" if torch.cuda.is_available() else "cpu"
+)
 device = torch.device(device_type)
-print(f"Using device: {device}")
+print(f"Using dtype and device: {dtype}, {device}")
 model.to(device).to(dtype)
 
 # Prepare the dataset
-train_dataset = AnyInstructSpeechDataset(args, processor)
+if args.data_set == "anyinstruct":
+    train_dataset = AnyInstructSpeechDataset(args, processor)
+elif args.data_set == "boolq":
+    train_dataset = BoolQDataset(args, processor)
+else:
+    raise ValueError(f"Unknown dataset: {args.data_set}")
+if args.num_samples:
+    train_dataset = train_dataset.select(range(args.num_samples))
+print(f"Loaded {len(train_dataset)} samples.")
 
 # Set up the data loader
-data_collator = DataCollatorForSeq2SeqWithAudio(tokenizer=llama_tokenizer)
+data_collator = DataCollatorForSeq2SeqWithAudio(tokenizer=text_tokenizer)
 train_loader = DataLoader(
-    train_dataset, batch_size=args.batch_size, collate_fn=data_collator, shuffle=True
+    train_dataset,
+    batch_size=args.batch_size,
+    collate_fn=data_collator,
 )
 
 # Set up the optimizer and learning rate scheduler
-
 lr = 2e-3
 if args.optimizer == "adamw_bnb_8bit":
     optimizer = AdamW8bit(model.parameters(), lr=lr)
@@ -211,10 +234,17 @@ scheduler = lr_scheduler.LambdaLR(
 )
 
 # Training loop
-num_epochs = args.num_epochs
-grad_accum_steps = 16
-
 print("Starting training...")
+num_epochs = args.num_epochs
+grad_accum_steps = args.grad_accum_steps
+print(f"epochs: {num_epochs}")
+print(f"grad_accum_steps: {grad_accum_steps}")
+print(f"learning_rate: {lr}")
+print(f"train dataset size: {len(train_dataset)}")
+print(f"train batchsize: {args.batch_size}")
+t_start = datetime.now()
+print(f"start time: {t_start}")
+
 model.train()
 for epoch in range(num_epochs):
     print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -241,3 +271,15 @@ for epoch in range(num_epochs):
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
+
+t_end = datetime.now()
+print(f"end time: {t_end}")
+print(f"elapsed: {t_end - t_start}")
+# print(f"total audio: {train_dataset.total_audio} seconds")
+
+output_dir = "./output"
+os.makedirs(output_dir, exist_ok=True)
+print(f"Saving model to {output_dir}")
+model.save_pretrained(output_dir, from_pt=True)
+text_tokenizer.save_pretrained(output_dir, from_pt=True)
+audio_processor.save_pretrained(output_dir, from_pt=True)

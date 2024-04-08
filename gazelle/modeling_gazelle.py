@@ -862,9 +862,12 @@ class GazelleProcessor(ProcessorMixin):
             TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]
         ] = None,
         audio=None,
-        padding: Union[bool, str, PaddingStrategy] = False,
-        truncation: Union[bool, str, TruncationStrategy] = None,
-        max_length=None,
+        text_padding: Union[bool, str, PaddingStrategy] = False,
+        text_truncation: Union[bool, str, TruncationStrategy] = None,
+        text_max_length=None,
+        audio_padding: Union[bool, str, PaddingStrategy] = False,
+        audio_truncation: Union[bool, str, TruncationStrategy] = None,
+        audio_max_length=None,
         return_tensors: Optional[Union[str, TensorType]] = TensorType.PYTORCH,
         sampling_rate: int = 16000,
     ) -> BatchFeature:
@@ -884,7 +887,7 @@ class GazelleProcessor(ProcessorMixin):
                  The audio or batch of audios to be prepared. Each audio can be NumPy array or PyTorch tensor. In case of a
                 NumPy array/PyTorch tensor, each audio should be of shape (C, T), where C is a number of channels, and T the
                 sample length of the audio.
-            padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*, defaults to `False`):
+            audio_padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*, defaults to `False`):
                 Select a strategy to pad the returned sequences (according to the model's padding side and padding
                 index) among:
                 - `True` or `'longest'`: Pad to the longest sequence in the batch (or no padding if only a single
@@ -893,9 +896,9 @@ class GazelleProcessor(ProcessorMixin):
                   acceptable input length for the model if that argument is not provided.
                 - `False` or `'do_not_pad'` (default): No padding (i.e., can output a batch with sequences of different
                   lengths).
-            max_length (`int`, *optional*):
+            audio_max_length (`int`, *optional*):
                 Maximum length of the returned list and optionally padding length (see above).
-            truncation (`bool`, *optional*):
+            audio_truncation (`bool`, *optional*):
                 Activates truncation to cut input sequences longer than `max_length` to `max_length`.
             return_tensors (`str` or [`~utils.TensorType`], *optional*):
                 If set, will return tensors of a particular framework. Acceptable values are:
@@ -919,7 +922,12 @@ class GazelleProcessor(ProcessorMixin):
         """
         if audio is not None and len(audio) > 0:
             x = self.audio_processor(
-                audio, return_tensors=return_tensors, sampling_rate=sampling_rate
+                audio,
+                return_tensors=return_tensors,
+                sampling_rate=sampling_rate,
+                padding=audio_padding,
+                truncation=audio_truncation,
+                max_length=audio_max_length
             )
             audio_values = x.input_values  # features
         else:
@@ -928,9 +936,9 @@ class GazelleProcessor(ProcessorMixin):
             text_inputs = self.tokenizer(
                 text,
                 return_tensors=return_tensors,
-                padding=padding,
-                truncation=truncation,
-                max_length=max_length,
+                padding=text_padding,
+                truncation=text_truncation,
+                max_length=text_max_length,
             )
             return BatchFeature(data={**text_inputs, "audio_values": audio_values})
         else:
