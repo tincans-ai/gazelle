@@ -527,9 +527,9 @@ class GazelleForConditionalGeneration(GazellePreTrainedModel):
 
         # 5. Fill the embeddings corresponding to the audio. Anything that is still zeros needs filling
         audio_to_overwrite = torch.all(final_embedding == 0, dim=-1)
-        audio_to_overwrite &= audio_to_overwrite.cumsum(-1) - 1 >= nb_image_pad[
-            :, None
-        ].to(target_device)
+        audio_positions = audio_to_overwrite.cumsum(-1).to(torch.float16) - 1
+        audio_left_pad_mask = audio_positions >= nb_image_pad[:, None].to(target_device)
+        audio_to_overwrite &= audio_left_pad_mask
 
         if audio_to_overwrite.sum() != audio_features.shape[:-1].numel():
             # print()
