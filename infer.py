@@ -5,7 +5,7 @@
 # This notebook requires 24GB of vRAM. The underlying models should be able to be quantized lower but it's pretty confusing how to do so within transformers.
 
 import argparse
-import string
+import time
 import torch
 import torchaudio
 import transformers
@@ -27,8 +27,11 @@ parser.add_argument(
     default="tincans-ai/gazelle-v0.2",
 )
 parser.add_argument(
-    "--data-type", "-d", help="Data type to use for the model", default="bfloat16"
+    "--device",
+    "-D",
+    help="Device to use for inference",
 )
+parser.add_argument("--data-type", help="Data type to use for the model")
 parser.add_argument(
     "--temperature", "-t", help="Temperature for sampling", default=0.0, type=float
 )
@@ -40,11 +43,18 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+device = args.device or (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available() else "cpu"
+)
+data_type = args.data_type or ("bfloat16" if torch.cuda.is_available() else "float32")
 dtype = (
     torch.bfloat16
     if args.data_type == "bfloat16"
     else torch.float16 if args.data_type == "float16" else torch.float32
 )
+
 
 model_id = args.model
 config = GazelleConfig.from_pretrained(model_id)
@@ -53,9 +63,7 @@ model = GazelleForConditionalGeneration.from_pretrained(model_id, torch_dtype=dt
 audio_processor = transformers.Wav2Vec2Processor.from_pretrained(
     "facebook/wav2vec2-base-960h"
 )
-
-if torch.cuda.is_available():
-    model = model.cuda()
+model = model.to(device).to(dtype)
 
 
 def inference_collator(audio_input, prompt: str):
@@ -69,7 +77,7 @@ def inference_collator(audio_input, prompt: str):
         msgs, return_tensors="pt", add_generation_prompt=True
     )
     return {
-        "audio_values": audio_values.squeeze(0).to(model.device).to(torch.bfloat16),
+        "audio_values": audio_values.squeeze(0).to(model.device).to(dtype),
         "input_ids": labels.to(model.device),
     }
 
@@ -79,32 +87,28 @@ def infer(audio_file: str, prompt: str):
     if sr != 16000:
         test_audio = torchaudio.transforms.Resample(sr, 16000)(test_audio)
     inputs = inference_collator(test_audio, prompt)
-    tokens = input_ids = inputs["input_ids"]
-    temperature = args.temperature if args.temperature > 0.0 else None
+    input_len = inputs["input_ids"].shape[1]
+    temperature = args.temperature or None
+    repetition_penalty = args.repetition_penalty or None
     do_sample = temperature is not None
-    prev_text = ""
-    while tokens.shape[1] - input_ids.shape[1] < args.max_tokens:
-        attention_mask = torch.ones(tokens.shape[1], device=tokens.device).unsqueeze(0)
-        tokens = model.generate(
-            tokens,
-            do_sample=do_sample,
-            max_length=tokens.shape[1] + 1,
-            temperature=temperature,
-            pad_token_id=tokenizer.eos_token_id,
-            repetition_penalty=args.repetition_penalty,
-            attention_mask=attention_mask,
-        )  # [1 x M + 1]
-        new_token = tokens[0][-1]
-        if new_token.item() == tokenizer.eos_token_id:
-            break
 
-        # Decode all output tokens; this ensure proper space insertion.
-        text = tokenizer.decode(tokens[0][input_ids.shape[1] :])
-        yield text[len(prev_text) :]
-        prev_text = text
+    output = model.generate(
+        **inputs,
+        do_sample=do_sample,
+        max_length=input_len + args.max_tokens,
+        temperature=temperature,
+        pad_token_id=tokenizer.eos_token_id,
+        repetition_penalty=repetition_penalty,
+    )
+    output_len = output.shape[1] - input_len
+    return tokenizer.decode(output[0][input_len:], skip_special_tokens=True), output_len
 
 
 if __name__ == "__main__":
-    for token in infer(args.audio_file, args.prompt):
-        print(token, end="", flush=True)
-    print("\n")
+    start_time = time.time()
+    result, num_tokens = infer(args.audio_file, args.prompt)
+    elapsed = time.time() - start_time
+    print(result)
+    print(
+        f"Generated {num_tokens} tokens in {elapsed:.2f} seconds, {num_tokens / elapsed:.2f} tps"
+    )
