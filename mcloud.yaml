@@ -1,7 +1,7 @@
 # Gazelle POC training configuration
 
 name: gazelle-poc
-image: mosaicml/composer:latest
+image: mosaicml/pytorch:latest
 compute:
   gpus: 8
   cluster: r7z2
@@ -10,4 +10,4 @@ integrations:
     git_repo: fixie-ai/gazelle
     pip_install: -r requirements.txt
 command: >-
-  python gazelle/train.py -n 100 -b 1 
+  python gazelle/train.py -n 1280 -b 4 -d anyinstruct

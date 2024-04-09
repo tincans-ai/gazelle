@@ -1,6 +1,6 @@
-torch>=2.1.2
+torch>=2.2.1
 transformers>=4.39.3
 bitsandbytes>=0.42.0
 librosa>=0.10.0
-requests>=2.26.0
+requests>=2.22.0
 datasets

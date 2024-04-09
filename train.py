@@ -1,4 +1,5 @@
 import argparse
+import io
 import math
 import os
 from dataclasses import dataclass
@@ -6,6 +7,7 @@ from datetime import datetime
 
 import librosa
 import numpy as np
+import requests
 import torch
 from bitsandbytes.optim import AdamW8bit
 from datasets import Audio, Dataset, IterableDataset, load_dataset
@@ -16,15 +18,40 @@ from transformers import DataCollatorForSeq2Seq, LlamaTokenizerFast, Wav2Vec2Pro
 from gazelle import GazelleConfig, GazelleForConditionalGeneration, GazelleProcessor
 
 SAMPLE_RATE = 16000
-TRANSCRIBE_PROMPT = (
-    "Transcribe the spoken words from <|audio|> with exact wording and punctuation"
-)
-ANSWER_PROMPT = "Listen to <|audio|> and respond to it"
+AUDIO_MODEL = "facebook/wav2vec2-base-960h"
+TEXT_MODEL = "meta-llama/Llama-2-7b-chat-hf"
+
 TRANSCRIBE_INPUT_TASK = "transcribe_input"
 TRANSCRIBE_OUTPUT_TASK = "transcribe_output"
 ANSWER_TASK = "answer"
-AUDIO_MODEL = "facebook/wav2vec2-base-960h"
-TEXT_MODEL = "meta-llama/Llama-2-7b-chat-hf"
+
+TRANSCRIBE_PROMPTS = [
+    # from Gazelle
+    "Transcribe <|audio|>",
+    "Transcribe exactly what is said here <|audio|>",
+    "Repeat exactly what is written here: <|audio|>",
+    "Write exactly what was said: <|audio|>",
+    "First listen to the clip. Then, transcribe exactly what is said. <|audio|>",
+    # from GPT-4
+    "Capture every word from <|audio|> verbatim",
+    "Convert speech to text from <|audio|>",
+    "Listen and transcribe the complete text from <|audio|>",
+    "Record in writing what is spoken in <|audio|>",
+    "Transcribe the spoken words from <|audio|> with exact wording and punctuation",
+]
+ANSWER_PROMPTS = [
+    # from Gazelle
+    "Listen to <|audio|> and respond to it",
+    "Listen and respond: <|audio|>",
+    "Respond to <|audio|>",
+    "Respond to the user <|audio|>",
+    "Respond to this question: \n<|audio|>",
+    "Continue the conversation after <|audio|>",
+    "First listen to the clip: <|audio|>\n How would you respond?",
+    "<|audio|> – respond",
+    "<|audio|>\n Respond to the question",
+    "<|audio|>",
+]
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -63,6 +90,7 @@ class GazelleDataset(IterableDataset):
         self.dataset = dataset
         self.processor = processor
         self.args = args
+        self.session = requests.Session()
 
     def __len__(self):
         return len(self.dataset)
@@ -70,13 +98,31 @@ class GazelleDataset(IterableDataset):
     def __getitem__(self, idx):
         if args.verbose:
             print(f"Processing sample {idx}...")
-        messages, audio = self._get_data(self.dataset[idx])
+        messages, audio = self._get_data(idx, self.dataset[idx])
         text = self.processor.tokenizer.apply_chat_template(messages, tokenize=False)
         return self._make_audio_sample(text, audio)
 
     def select(self, indices):
         self.dataset = self.dataset.select(indices)
         return self
+
+    def _get_answer_prompt(self, idx):
+        return ANSWER_PROMPTS[idx % len(ANSWER_PROMPTS)]
+
+    def _get_transcribe_prompt(self, idx):
+        return TRANSCRIBE_PROMPTS[idx % len(TRANSCRIBE_PROMPTS)]
+
+    def _load_audio(self, base_url: str, folder: str, filename: str):
+        if self.args.data_dir:
+            audio_path = f"{self.args.data_dir}/{folder}/{filename}"
+            audio, _ = librosa.load(audio_path, sr=SAMPLE_RATE)
+        else:
+            url = f"{base_url}/{folder}/{filename}"
+            response = self.session.get(url)
+            response.raise_for_status()
+            audio_bytes = io.BytesIO(response.content)
+            audio, _ = librosa.load(audio_bytes, sr=SAMPLE_RATE)
+        return audio
 
     def _make_audio_sample(self, text: str, audio: np.ndarray):
         # Process audio and text using GazelleProcessor.
@@ -119,42 +165,43 @@ class AnyInstructSpeechDataset(GazelleDataset):
         dataset = load_dataset(
             "json",
             data_dir=args.data_dir,
-            data_files="metadata.jsonl",
+            data_files="https://huggingface.co/datasets/fnlp/AnyInstruct/resolve/main/speech_conv/metadata.jsonl",
             split="train",
         )
         super().__init__(dataset, processor, args)
 
-    def _get_data(self, row):
-        task = self._create_task(row, ANSWER_TASK)
-        audio_filename = task["audio_filename"]
-        audio_path = os.path.join(args.data_dir, "speech", audio_filename)
-        audio, _ = librosa.load(audio_path, sr=SAMPLE_RATE)
-        return task["messages"], audio
+    def _get_data(self, idx, row):
+        return self._create_task(idx, row, ANSWER_TASK)
 
-    def _create_task(self, sample, task):
+    def _create_task(self, idx, sample, task):
         chat = sample["chat"]
         if task == ANSWER_TASK:
             # We ask the LLM to generate a text answer to the input query.
             messages = [
-                {"role": "user", "content": ANSWER_PROMPT},
+                {"role": "user", "content": self._get_answer_prompt(idx)},
                 {"role": "assistant", "content": chat[1]["message"]},
             ]
             audio_filename = chat[0]["speech"]
         elif task == TRANSCRIBE_INPUT_TASK:
             # We ask the LLM to generate a text transcript for the input query.
             messages = [
-                {"role": "user", "content": TRANSCRIBE_PROMPT},
+                {"role": "user", "content": self._get_transcribe_prompt(idx)},
                 {"role": "assistant", "content": chat[0]["message"]},
             ]
             audio_filename = chat[0]["speech"]
         elif task == TRANSCRIBE_OUTPUT_TASK:
             # We ask the LLM to generate a text transcript for the output answer.
             messages = [
-                {"role": "user", "content": TRANSCRIBE_PROMPT},
+                {"role": "user", "content": self._get_transcribe_prompt(idx)},
                 {"role": "assistant", "content": chat[1]["message"]},
             ]
             audio_filename = chat[1]["speech"]
-        return {"messages": messages, "audio_filename": audio_filename}
+
+        speech_base_url = (
+            "https://storage.googleapis.com/train-anyinstruct-speechconv-v1"
+        )
+        audio = self._load_audio(speech_base_url, "speech", audio_filename)
+        return messages, audio
 
 
 class BoolQDataset(GazelleDataset):
@@ -164,12 +211,9 @@ class BoolQDataset(GazelleDataset):
         )
         super().__init__(dataset, processor, args)
 
-    def _get_data(row):
+    def _get_data(self, idx, row):
         messages = [
-            {
-                "role": "user",
-                "content": TRANSCRIBE_PROMPT,
-            },  # should this be ANSWER_PROMPT?
+            {"role": "user", "content": self._get_answer_prompt(idx)},
             {"role": "assistant", "content": row["question"]},
         ]
         return messages, row["audio"]["array"]

@@ -6,14 +6,12 @@
 
 import argparse
 import time
+
 import torch
 import torchaudio
 import transformers
 
-from gazelle import (
-    GazelleConfig,
-    GazelleForConditionalGeneration,
-)
+from gazelle import GazelleConfig, GazelleForConditionalGeneration
 
 parser = argparse.ArgumentParser()
 parser.add_argument("audio_file", help="Path to the audio file")
