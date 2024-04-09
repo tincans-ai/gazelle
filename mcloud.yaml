@@ -1,7 +1,7 @@
 # Gazelle POC training configuration
 
 name: gazelle-poc
-image: mosaicml/pytorch:latest
+image: mosaicml/composer:latest
 compute:
   gpus: 8
   cluster: r7z2
