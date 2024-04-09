@@ -61,6 +61,7 @@ parser.add_argument("--data-dir", "-p", type=str)
 parser.add_argument("--device", "-D", type=str, default="cuda")
 parser.add_argument("--data-type", "-t", type=str, default="bfloat16")
 parser.add_argument("--optimizer", "-o", type=str, default="adamw_bnb_8bit")
+parser.add_argument("--num-prompts", "-P", type=int, default=1)
 parser.add_argument("--num-samples", "-n", type=int)
 parser.add_argument("--num-epochs", "-e", type=int, default=1)
 parser.add_argument("--grad-accum-steps", "-g", type=int, default=16)
@@ -107,17 +108,19 @@ class GazelleDataset(IterableDataset):
         return self
 
     def _get_answer_prompt(self, idx):
-        return ANSWER_PROMPTS[idx % len(ANSWER_PROMPTS)]
+        prompt_idx = idx % min(self.args.num_prompts, len(ANSWER_PROMPTS))
+        return ANSWER_PROMPTS[prompt_idx]
 
     def _get_transcribe_prompt(self, idx):
-        return TRANSCRIBE_PROMPTS[idx % len(TRANSCRIBE_PROMPTS)]
+        prompt_idx = idx % min(self.args.num_prompts, len(TRANSCRIBE_PROMPTS))
+        return TRANSCRIBE_PROMPTS[prompt_idx]
 
     def _load_audio(self, base_url: str, folder: str, filename: str):
         if self.args.data_dir:
             audio_path = f"{self.args.data_dir}/{folder}/{filename}"
             audio, _ = librosa.load(audio_path, sr=SAMPLE_RATE)
         else:
-            url = f"{base_url}/{folder}/{filename}"
+            url = f"{base_url}/{filename}"  # hack for GCS bucket naming
             response = self.session.get(url)
             response.raise_for_status()
             audio_bytes = io.BytesIO(response.content)
