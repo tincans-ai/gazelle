@@ -255,7 +255,7 @@ elif args.data_set == "boolq":
 else:
     raise ValueError(f"Unknown dataset: {args.data_set}")
 if args.num_samples:
-    train_dataset = train_dataset.select(range(args.num_samples))
+    train_dataset = train_dataset.select(range(min(args.num_samples, len(train_dataset)))) # use min
 print(f"Loaded {len(train_dataset)} samples.")
 
 # Set up the data loader
@@ -269,9 +269,9 @@ train_loader = DataLoader(
 # Set up the optimizer and learning rate scheduler
 lr = 2e-3
 if args.optimizer == "adamw_bnb_8bit":
-    optimizer = AdamW8bit(model.parameters(), lr=lr)
+    optimizer = AdamW8bit(model.multi_modal_projector.parameters(), lr=lr) # only train projection layer
 elif args.optimizer == "adamw":
-    optimizer = AdamW(model.parameters(), lr=lr)
+    optimizer = AdamW(model.multi_modal_projector.parameters(), lr=lr)
 else:
     raise ValueError(f"Unknown optimizer: {args.optimizer}")
 scheduler = lr_scheduler.LambdaLR(
@@ -324,9 +324,23 @@ print(f"end time: {t_end}")
 print(f"elapsed: {t_end - t_start}")
 # print(f"total audio: {train_dataset.total_audio} seconds")
 
+# save
 output_dir = "./output"
+output_dir_audio_processor = output_dir + "_audio_processor"
+output_dir_tokenizer = output_dir + "_tokenizer"
 os.makedirs(output_dir, exist_ok=True)
+os.makedirs(output_dir_audio_processor, exist_ok=True)
+os.makedirs(output_dir_tokenizer, exist_ok=True)
 print(f"Saving model to {output_dir}")
-model.save_pretrained(output_dir, from_pt=True)
-text_tokenizer.save_pretrained(output_dir, from_pt=True)
-audio_processor.save_pretrained(output_dir, from_pt=True)
+model.save_pretrained(output_dir, from_pt=True) # save gazelle model (GazelleForConditionalGeneration)
+print(f"Saving projection layer to {output_dir}")
+torch.save({
+    'model_state_dict': model.multi_modal_projector.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'epoch': epoch,
+    'loss': loss,
+}, f"{output_dir}/multi_modal_projector.tensor") # manually save projection layer
+print(f"Saving audio processor {output_dir_audio_processor}")
+audio_processor.save_pretrained(output_dir_audio_processor, from_pt=True) # save Wav2Vec2Processor
+print(f"Saving tokenizer {output_dir_tokenizer}")
+text_tokenizer.save_pretrained(output_dir_tokenizer, from_pt=True) # save LlamaTokenizer
