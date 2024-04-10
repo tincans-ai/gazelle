@@ -11,7 +11,9 @@ import torch
 import torchaudio
 import transformers
 
-from gazelle import GazelleConfig, GazelleForConditionalGeneration
+from gazelle import GazelleForConditionalGeneration, GazelleProcessor
+
+SAMPLE_RATE = 16000
 
 parser = argparse.ArgumentParser()
 parser.add_argument("audio_file", help="Path to the audio file")
@@ -22,7 +24,7 @@ parser.add_argument(
     "--model",
     "-m",
     help="Model ID to use for the model",
-    default="tincans-ai/gazelle-v0.2",
+    default="tincans-ai/gazelle-v0.1", # v0.2 uses Mistral instead of Llama!
 )
 parser.add_argument(
     "--device",
@@ -55,24 +57,32 @@ dtype = (
 
 
 model_id = args.model
-config = GazelleConfig.from_pretrained(model_id)
-tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
-model = GazelleForConditionalGeneration.from_pretrained(model_id, torch_dtype=dtype)
-audio_processor = transformers.Wav2Vec2Processor.from_pretrained(
-    "facebook/wav2vec2-base-960h"
-)
+if model_id == "tincans-ai/gazelle-v0.1":
+    model = GazelleForConditionalGeneration.from_pretrained(model_id, torch_dtype=dtype)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    audio_processor = transformers.AutoProcessor.from_pretrained(model_id)
+else:
+    model = GazelleForConditionalGeneration.from_pretrained(model_id, torch_dtype=dtype)
+    audio_processor = transformers.AutoProcessor.from_pretrained(f"{model_id}_audio_processor")
+    tokenizer = transformers.AutoTokenizer.from_pretrained(f"{model_id}_tokenizer")
+    # manually load projection layer
+    checkpoint = torch.load(f"{model_id}/multi_modal_projector.tensor")
+    model.multi_modal_projector.load_state_dict(checkpoint['model_state_dict'])
+
 model = model.to(device).to(dtype)
 
-
-def inference_collator(audio_input, prompt: str):
+def inference_collator(audio_input: torch.Tensor, prompt: str):
     audio_values = audio_processor(
-        audio=audio_input, return_tensors="pt", sampling_rate=16000
+        audio=audio_input,
+        return_tensors="pt",
+        sampling_rate=SAMPLE_RATE
     ).input_values
     msgs = [
         {"role": "user", "content": prompt},
     ]
     labels = tokenizer.apply_chat_template(
-        msgs, return_tensors="pt", add_generation_prompt=True
+        msgs, return_tensors="pt",
+        add_generation_prompt=True
     )
     return {
         "audio_values": audio_values.squeeze(0).to(model.device).to(dtype),
@@ -82,8 +92,8 @@ def inference_collator(audio_input, prompt: str):
 
 def infer(audio_file: str, prompt: str):
     test_audio, sr = torchaudio.load(audio_file)
-    if sr != 16000:
-        test_audio = torchaudio.transforms.Resample(sr, 16000)(test_audio)
+    if sr != SAMPLE_RATE:
+        test_audio = torchaudio.transforms.Resample(sr, SAMPLE_RATE)(test_audio)
     inputs = inference_collator(test_audio, prompt)
     input_len = inputs["input_ids"].shape[1]
     temperature = args.temperature or None
