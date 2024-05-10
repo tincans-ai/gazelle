@@ -983,21 +983,21 @@ class GazelleClient:
         # If the quantization config is None, then load the model in the default way. 
         if quantization is None:
             device = "cpu"
-            dtype = torch.float32
+            self.audio_dtype = torch.float32
             if torch.cuda.is_available():
                 device = "cuda"
-                dtype = torch.bfloat16
+                self.audio_dtype = torch.bfloat16
                 print(f"Using {device} device")
             elif torch.backends.mps.is_available():
                 device = "mps"
-                dtype = torch.float16
+                self.audio_dtype = torch.float16
                 print(f"Using {device} device")
 
             # Load the model.
             self.model = GazelleForConditionalGeneration.from_pretrained(
                 model_id,
-                torch_dtype=dtype
-            ).to(device, dtype=dtype)
+                torch_dtype=self.audio_dtype
+            ).to(device, dtype=self.audio_dtype)
 
         # If the quantization config is not None,
         else:
@@ -1022,7 +1022,7 @@ class GazelleClient:
         )
 
     def inference_collator(
-        self, audio_input, prompt="Transcribe the following \n<|audio|>", audio_dtype=torch.float16
+        self, audio_input, prompt="Transcribe the following \n<|audio|>"
     ):
         audio_values = self.audio_processor(
             audio=audio_input, return_tensors="pt", sampling_rate=16000
@@ -1033,6 +1033,7 @@ class GazelleClient:
         labels = self.tokenizer.apply_chat_template(
             msgs, return_tensors="pt", add_generation_prompt=True
         )
+        audio_dtype = self.audio_dtype
         return {
             "audio_values": audio_values.squeeze(0).to("cuda").to(audio_dtype),
             "input_ids": labels.to("cuda"),
