@@ -1042,4 +1042,6 @@ class GazelleClient:
         """Inference method for the Gazelle model."""
         inputs = self.inference_collator(audio_input, prompt=prompt)
         response = self.tokenizer.decode(self.model.generate(**inputs, max_new_tokens=64)[0])
+        # Get everything after [/INST] token.
+        response = response.split("[/INST]")[1].strip()
         return response
