@@ -4,6 +4,7 @@ from .modeling_gazelle import (
     GazelleForConditionalGeneration,
     GazellePreTrainedModel,
     GazelleProcessor,
+    GazelleClient,
 )
 
 __version__ = "0.1.0"
