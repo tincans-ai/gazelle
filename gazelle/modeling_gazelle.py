@@ -979,8 +979,6 @@ class GazelleClient:
         self.model_id = model_id
         self.config = GazelleConfig.from_pretrained(model_id)
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
-        if quantization:
-            self.config.quantization_config = BitsAndBytesConfig(**quantization)
 
         # If the quantization config is None, then load the model in the default way. 
         if quantization is None:
