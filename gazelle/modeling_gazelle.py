@@ -111,6 +111,7 @@ class GazelleConfig(PretrainedConfig):
         vocab_size=32000,
         hidden_size=4096,
         stack_factor=8,
+        projector_type="mlp",
         **kwargs,
     ):
         self.ignore_index = ignore_index
@@ -125,6 +126,7 @@ class GazelleConfig(PretrainedConfig):
 
         self.hidden_size = hidden_size
         self.stack_factor = stack_factor
+        self.projector_type = projector_type
 
         if isinstance(self.text_config, dict):
             text_config["model_type"] = (
@@ -260,6 +262,54 @@ class GazelleProjector(ProjectionLayer):
         hidden_states = self.linear_1(audio_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
+        hidden_states = self.ln_post(hidden_states)
+        return hidden_states
+
+
+class GazelleHierarchalProjector(ProjectionLayer):
+    """Uses 2 stackings in the projection (e.g. 1 -> 4 -> 8)
+
+    Theory is that this learns a better local representation while still resulting in a smaller sequence length.
+    """
+
+    def _pad_and_stack(self, audio_embeds: torch.Tensor, stack_factor) -> torch.Tensor:
+        "Stack audio embeddings to downsample in time dimension, then pad to the nearest multiple of `stack_factor`"
+        B, T, C = audio_embeds.shape
+        audio_embeds = F.pad(audio_embeds, (0, 0, 0, stack_factor - T % stack_factor))
+        B, T, C = audio_embeds.shape
+        audio_embeds = audio_embeds.view(B, T // stack_factor, C * stack_factor)
+        return audio_embeds
+
+    def __init__(self, config: GazelleConfig):
+        self.hidden_dim = config.hidden_size
+        super().__init__(config.stack_factor)
+        self.ln_pre = RMSNorm(config.audio_config.hidden_size * self.stack_factor // 2)
+
+        self.mlp_one = nn.Sequential(
+            nn.Linear(
+                config.audio_config.hidden_size * (self.stack_factor // 2),
+                self.hidden_dim * 2,
+                bias=False,
+            ),
+            SwiGLU(),
+        )
+        self.mlp_two = nn.Sequential(
+            nn.Linear(
+                self.hidden_dim * 2,
+                config.text_config.hidden_size * 2,
+                bias=False,
+            ),
+            SwiGLU(),
+        )
+
+        self.ln_post = RMSNorm(config.text_config.hidden_size)
+
+    def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
+        audio_features = self._pad_and_stack(audio_features, self.stack_factor // 2)
+        audio_features = self.ln_pre(audio_features)
+        hidden_states = self.mlp_one(audio_features)
+        hidden_states = self._pad_and_stack(hidden_states, 2)
+        hidden_states = self.mlp_two(hidden_states)
         hidden_states = self.ln_post(hidden_states)
         return hidden_states
 
@@ -400,7 +450,13 @@ class GazelleForConditionalGeneration(GazellePreTrainedModel):
         else:
             self.audio_tower = AutoModel.from_config(config.audio_config)
 
-        self.multi_modal_projector = GazelleProjector(config)
+        if (
+            "bert" in self.audio_tower.config.model_type.lower()
+            or self.config.projector_type == "hierarchal"
+        ):
+            self.multi_modal_projector = GazelleHierarchalProjector(config)
+        else:
+            self.multi_modal_projector = GazelleProjector(config)
         self.vocab_size = config.vocab_size
         if config.text_model_id is not None:
             self.language_model = AutoModelForCausalLM.from_pretrained(
