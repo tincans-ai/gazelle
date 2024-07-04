@@ -4,6 +4,8 @@ from .modeling_gazelle import (
     GazelleForConditionalGeneration,
     GazellePreTrainedModel,
     GazelleProcessor,
+    GazelleClient,
+    load_audio_from_file,
 )
 
 __version__ = "0.1.0"
